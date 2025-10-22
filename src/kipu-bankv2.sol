@@ -343,3 +343,4 @@ contract KipuBank is AccessControl, ReentrancyGuard {
     fallback() external payable {
         revert ZeroDeposit(); 
     }
+}
