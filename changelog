@@ -1,0 +1,74 @@
+Changelog
+==========
+
+v2 -> v3 — Resumen de cambios importantes
+---------------------------------------
+
+Contexto
+ - KipuBank v2: contrato monolítico con soporte multi-token, contabilidad interna en USD mediante oráculos Chainlink, AccessControl y protección básica (ReentrancyGuard, SafeERC20).
+ - KipuBank v3: refactorización modular que introduce swaps a USDC como unidad de contabilidad persistente, separación de responsabilidades y nuevos módulos auxiliares.
+
+Cambios funcionales principales
+ - Arquitectura modular:
+	 - Se extrae la gestión de roles a `RoleManager` (src/libs/roleManager.sol).
+	 - Se externaliza la lógica de swaps a `tokenSwapManager` (src/libs/tokenSwapManager.sol).
+	 - Se introduce `TokenManager` (src/libs/tokenManager.sol) para centralizar metadata y utilidades de tokens.
+
+ - Contabilidad unificada en USDC:
+	 - En v3 los depósitos (ETH o ERC-20) se convierten a USDC y los saldos de usuarios se almacenan en USDC (6 decimales).
+	 - Esto simplifica cálculo de `bankCap` y límites en USD.
+
+ - Flujo de depósito actualizado:
+	 - `depositETH()`: swapea ETH -> USDC vía `tokenSwapManager`, actualiza saldo en USDC.
+	 - `depositERC20()`: si el token es USDC se acepta directamente; si no, se recibe el token y se swapea a USDC.
+	 - `withdraw()`: actualmente devuelve USDC directamente (diseño extensible para swap inverso si se requiere).
+
+ - Dependencia en AMM/Router:
+	 - v3 añade dependencia explícita en UniswapV2 router/factory para swaps.
+	 - `tokenSwapManager` verifica existencia de par token/USDC y realiza swaps; introduce riesgos operativos (slippage, pares faltantes).
+
+API y almacenamiento
+ - Variables inmutables en constructor: `bankCapUsd`, `withdrawalLimitUsd`, `ethUsdFeed` se mantienen pero adaptadas al nuevo flujo.
+ - Cambio en estructura de balances:
+	 - v2: mapping(address => mapping(address => uint256)) balances por usuario y token.
+	 - v3: mapping(address => uint256) balances en USDC por usuario (simplificado).
+ - Nuevas o modificadas funciones públicas:
+	 - `depositETH()`, `depositERC20(address,uint256)`, `withdraw(address,uint256)` manteniendo firmas pero con comportamiento interno distinto (swap -> USDC).
+	 - `getVaultBalance()` simplificada para devolver saldo en USDC.
+	 - `wouldExceedBankCap()` ahora puede apoyarse en conversiones por oráculo o estimaciones previas al swap.
+
+Seguridad y consideraciones
+ - Conserva protecciones: `ReentrancyGuard`, `SafeERC20`, errores personalizados y roles.
+ - Riesgos añadidos por swaps:
+	 - Slippage y front-running durante swaps.
+	 - Falta de pair/token en factory (falla el swap). Es necesario un fallback y manejo claro de errores.
+ - Recomendaciones:
+	 - Añadir minOut/slippage configurable en las llamadas de swap.
+	 - Tests de integración contra fork/mainnet o mocks del router.
+	 - Auditoría independiente del `tokenSwapManager` y rutas de swap.
+
+Operacional y despliegue
+ - Parámetros adicionales para desplegar v3: direcciones de router Uniswap, dirección USDC y porcentaje de slippage por defecto.
+ - Orden de despliegue sugerida:
+	 1. Desplegar o verificar direcciones del router y USDC en la red.
+	 2. Desplegar `tokenSwapManager` (si se usa como contrato separado).
+	 3. Desplegar `kipu-bankv3` pasando referencias necesarias y asignar roles iniciales.
+
+Notas de migración
+ - Migración de saldos v2 -> v3 no automatizada: requerirá script off-chain que convierta/valide balances y, si procede, swapee fondos a USDC antes de acreditar en v3.
+ - Alternativa: mantener contrato v2 como read-only para histórico y migrar usuarios manualmente.
+
+Limitaciones conocidas y próximos pasos
+ - `tokenSwapManager` contiene implementaciones incompletas/placeholder en el repo (revisar y corregir nombres, rutas y errores de compilación).
+ - Añadir validación de frescura de precios (price staleness) si se usa oráculo para checks.
+ - Implementar pausability/circuit-breaker para mitigar fallos en AMM.
+ - Tests adicionales: integración swap, reembolsos en fallos de swap, stress tests de bankCap.
+
+Registro de versión
+ - v2: `src/kipu-bankv2.sol` — contrato monolítico original con contabilidad en USD vía Chainlink.
+ - v3: `src/kipu-bankv3.sol`, `src/libs/roleManager.sol`, `src/libs/tokenSwapManager.sol`, `src/libs/tokenManager.sol` — nueva arquitectura modular y swap-to-USDC.
+
+---
+
+Generado automáticamente a partir del estado actual de la rama `kipu-bankv3` y comparando con `kipu-bankv2`.
+
