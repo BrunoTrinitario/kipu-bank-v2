@@ -159,7 +159,7 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenSwapManager {
     /// @notice Función para retirar fondos del banco, ya sea ETH o tokens ERC20.
     /// @param token token de la cripto a retirar (usar address(0) para ETH)
     /// @param amount cantidad a retirar (en usdc)
-    function withdraw(address token, uint256 amount) external nonReentrant {
+    function withdraw(uint256 amount) external nonReentrant {
         if (amount == 0) revert InvalidParams();
 
         // Validamos que el usuario tenga suficiente USDC
