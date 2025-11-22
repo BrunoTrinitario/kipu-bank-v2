@@ -45,6 +45,8 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
     /// @notice Saldo de los usuarios: usuario => cantidad (unidades nativas del token)
     mapping(address => uint256) private balances;
     AggregatorV3Interface public immutable ethUsdFeed;
+    //Address del token USDC
+    address public usdc;
 
 
     // contadores
@@ -66,12 +68,13 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
     /// @param _bankCapUsd Limite del banco expresado en USD (e.g. $1,000 = 1_000 * 10**6)
     /// @param _withdrawalLimitUsd Límite de retiro por transacción en USD con USDC_DECIMALS
     /// @param _ethUsdFeed Feed de precios Chainlink ETH / USD
-    constructor(uint256 _bankCapUsd, uint256 _withdrawalLimitUsd, address _ethUsdFeed) RoleManager() TokenManager(_ethUsdFeed) {
+    constructor(uint256 _bankCapUsd, uint256 _withdrawalLimitUsd, address _ethUsdFeed, address _usdc) RoleManager() TokenManager(_usdc) {
         if (_ethUsdFeed == address(0) || _bankCapUsd == 0) revert InvalidParams();
         // Incializamos el limite del banco y el límite de retiro en USD
         bankCapUsd = _bankCapUsd;
         withdrawalLimitUsd = _withdrawalLimitUsd;
         ethUsdFeed = AggregatorV3Interface(_ethUsdFeed);
+        usdc = _usdc;
     }
 
     /// @notice Función de rescate para que el administrador pueda recuperar tokens o ETH enviados por error al contrato.
@@ -105,7 +108,7 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
         }
     
         //Actualizar balances y total global
-        setAccountBalance(user, usdValue, usdValue);
+        setAccountBalance(msg.sender, usdValue, usdValue);
     
         emit Deposit(msg.sender, ETH_ADDRESS, msg.value, balances[msg.sender], usdValue);
     }
@@ -116,34 +119,37 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
     function depositERC20(address token, uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroDeposit();
 
-        // Si el token es USDC, no hace falta swappear.
         uint256 usdcReceived;
+
+        // 1. Transferencia y Swap
         if (token == usdc) {
             IERC20(usdc).safeTransferFrom(msg.sender, address(this), amount);
             usdcReceived = amount;
         } else {
-            // Transferimos el token al contrato antes del swap
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-
-            // Swapeamos el token recibido a USDC
+            // Realizamos el swap. Si luego hacemos revert, este swap SE DESHACE.
             usdcReceived = swapTokenForUSDC(token, amount);
         }
 
-        // Convertimos los USDC recibidos a su valor USD (1:1)
+        // 2. Valoración
         uint256 usdValue = usdcReceived;
 
-        // Validamos que no se exceda el bank cap
-        uint256 availableUsd = (bankCapUsd > totalUsdDeposited)
-            ? bankCapUsd - totalUsdDeposited
-            : 0;
+        // 3. Validación del Bank Cap
         if (usdValue + totalUsdDeposited > bankCapUsd) {
-            emit BankCapExceededEvent(usdValue, availableUsd);
-            // Devolvemos los USDC al usuario si se excede
-            IERC20(usdc).safeTransfer(msg.sender, usdcReceived);
+            uint256 availableUsd = (bankCapUsd > totalUsdDeposited) 
+                ? bankCapUsd - totalUsdDeposited 
+                : 0;
+
+            // ALERTA: Al ejecutar este revert, la EVM deshace todos los cambios anteriores.
+            // 1. Los USDC del swap vuelven al Exchange.
+            // 2. El token original vuelve al contrato.
+            // 3. El token original vuelve del contrato a la billetera del usuario.
             revert BankCapExceeded(usdValue, availableUsd);
         }
 
-        setAccountBalance(user, usdValue, usdValue);
+        // 4. Actualización (Solo llegamos aquí si NO se revirtió)
+        totalUsdDeposited += usdValue;
+        setAccountBalance(msg.sender, usdValue, usdValue);
 
         emit Deposit(msg.sender, token, amount, balances[msg.sender], usdValue);
     }
@@ -166,7 +172,7 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
             revert WithdrawalLimitExceeded(usdValue, withdrawalLimitUsd);
 
         // Actualizamos balances y total global
-        balances[msg.sender][usdc] = userBalanceUSDC - amount;
+        balances[msg.sender] = userBalanceUSDC - amount;
         totalUsdDeposited = (totalUsdDeposited > usdValue) ? totalUsdDeposited - usdValue : 0;
         withdrawCount += 1;
 
@@ -180,15 +186,6 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
     /// @notice Dado un usuario y un token, retorna el saldo en el vault
     function getVaultBalance() external view returns (uint256) {
         return balances[msg.sender];
-    }
-
-    /// @notice funcion para determina si un deposito excederia el limite del banco
-    /// @param token token de la cripto a depositar (usar address(0) para ETH)
-    /// @param amount cantidad a depositar (unidades nativas del token)
-    function wouldExceedBankCap(address token, uint256 amount) external view returns (bool, uint256, uint256) {
-        uint256 usd = convertTokenAmountToUsd(token, amount);
-        uint256 availableUsd = (bankCapUsd > totalUsdDeposited) ? bankCapUsd - totalUsdDeposited : 0;
-        return (usd + totalUsdDeposited > bankCapUsd, usd, availableUsd);
     }
 
     /// @notice Función interna para actualizar el saldo de un usuario y el total USD depositados.
@@ -208,63 +205,4 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
         revert ZeroDeposit(); 
     }
 
-
-    function convertTokenAmountToUsd(address token, uint256 amount) external view returns (uint256) {
-        if (amount == 0) return 0;
-
-        // obtenemos el feed de precios correspondiente
-        // esto quiere decir: al intanciar nuestro contrato nostros le pasamos el feed de ETH/USD
-        // significa que creamos un contrato, en el cual puede determinar el valor de ETH en USD en tiempo real
-        AggregatorV3Interface feed = ethUsdFeed;
-        // obtenemos los decimales del feed
-        uint8 feedDecimals = feed.decimals();
-
-        // decimales del token default 18 (ETH)
-        uint8 tokenDecimalsLocal = 18;
-        //Si el token que queremos convertir es ETH nativo usamos el feed ethUsdFeed
-        if (token == ETH_ADDRESS) {
-            //Usamos el feed ethUsdFeed ya seteado en el constructor
-            // obtenemos el precio del ETH en USD
-            (, int256 priceInt, , , ) = feed.latestRoundData();
-            require(priceInt > 0, "invalid price");
-            uint256 price = uint256(priceInt);
-            //Calculamos el valor en USD
-            // usdWithPriceDecimals = (amount * price) / (10 ** tokenDecimals)
-            uint256 usdWithPriceDecimals = (amount * price) / (10 ** tokenDecimalsLocal);
-            // ajustamos a USDC_DECIMALS
-            // si los decimales del feed son mayores o iguales a USDC_DECIMALS, dividimos
-            // si no, multiplicamos
-            if (feedDecimals >= USDC_DECIMALS) {
-                return usdWithPriceDecimals / (10 ** (feedDecimals - USDC_DECIMALS));
-            } else {
-                return usdWithPriceDecimals * (10 ** (USDC_DECIMALS - feedDecimals));
-            }
-        } else {
-            // Si el token no es ETH nativo y es un ERC20, obtenemos su feed de precios y decimales
-            // Validamos que este registrado y tenga feed de precios
-            TokenInfo memory t = tokenInfo[token];
-            require(t.registered, "token not registered");
-            require(t.priceFeed != address(0), "no feed");
-            //Obtenemos el feed y sus decimales
-            feed = AggregatorV3Interface(t.priceFeed);
-            feedDecimals = feed.decimals();
-            tokenDecimalsLocal = t.decimals;
-            // obtenemos el precio del token en USD
-            (, int256 priceInt, , , ) = feed.latestRoundData();
-            require(priceInt > 0, "invalid price");
-            uint256 price = uint256(priceInt);
-
-            //Calculamos el valor en USD
-            // usdWithPriceDecimals = (amount * price) / (10 ** tokenDecimals)
-            uint256 usdWithPriceDecimals = (amount * price) / (10 ** tokenDecimalsLocal);
-            // ajustamos a USDC_DECIMALS
-            // si los decimales del feed son mayores o iguales a USDC_DECIMALS, dividimos
-            // si no, multiplicamos
-            if (feedDecimals >= USDC_DECIMALS) {
-                return usdWithPriceDecimals / (10 ** (feedDecimals - USDC_DECIMALS));
-            } else {
-                return usdWithPriceDecimals * (10 ** (USDC_DECIMALS - feedDecimals));
-            }
-        }
-    }
 }
