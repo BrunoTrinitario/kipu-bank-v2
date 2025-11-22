@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import { UniversalRouter } from "lib/universal-router/contracts/UniversalRouter.sol";
+import "@uniswap/universal-router/contracts/interfaces/IUniversalRouter.sol";
 import { Commands } from "lib/universal-router/contracts/libraries/Commands.sol";
 import "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @title tokenSwapManager
+/// @title TokenSwapManager
 /// @notice Módulo simple para swappear tokens y ETH a USDC usando Universal Router (Uniswap v4)
 /// @dev Mantiene la interfaz pública original: swapTokenForUSDC y swapETHForUSDC
-contract tokenSwapManager {
+contract TokenSwapManager {
     using SafeERC20 for IERC20;
 
-    UniversalRouter public immutable universalRouter;
+    IUniversalRouter public immutable universalRouter;
     address public immutable usdc; // token de contabilidad interna (USDC)
 
     error ZeroDeposit();
@@ -24,9 +24,9 @@ contract tokenSwapManager {
     /// @param _universalRouter Dirección del Universal Router (Uniswap v4)
     /// @param _usdc Dirección del token USDC
     /// @param _slippageBps Slippage permitido en basis points (por ejemplo 100 = 1%)
-    constructor(address _usdc,address _universalRouter ,uint16 _slippageBps) {
+    constructor(address _usdc,address payable _universalRouter ,uint16 _slippageBps) {
         require(_universalRouter != address(0) && _usdc != address(0), "invalid params");
-        universalRouter = UniversalRouter(_universalRouter);
+        universalRouter = IUniversalRouter(_universalRouter);
         usdc = _usdc;
         slippageBps = _slippageBps;
     }
@@ -42,28 +42,40 @@ contract tokenSwapManager {
 
         uint256 beforeBal = IERC20(usdc).balanceOf(address(this));
 
-        // Comando simple EXACT_INPUT_SINGLE (según librería Commands de Universal Router)
-        bytes memory commands = abi.encodePacked(Commands.EXACT_INPUT_SINGLE);
+        // Comando EXACT_INPUT_SINGLE (V3 swap exact in)
+        bytes memory commands = abi.encodePacked(Commands.V3_SWAP_EXACT_IN);
 
-        // NOTA IMPORTANTE: La estructura de `inputs` depende de tu versión de Universal Router.
-        // Aquí usamos un encoding genérico: (tokenIn, tokenOut, amountIn, minAmountOut, recipient)
-        // minAmountOut lo dejamos en 0 para simplificar (no protegido contra slippage).
+        // inputs debe ser un array de bytes, no un bytes plano
+        bytes[] memory inputs = new bytes[](1);
+
+        // Estructura del input para V3 swap exact in:
+        // tokenIn, tokenOut, amountIn, minAmountOut, recipient
         uint256 minAmountOut = 0;
-        bytes memory inputs = abi.encode(token, usdc, amount, minAmountOut, address(this));
+        inputs[0] = abi.encode(
+            token,
+            usdc,
+            amount,
+            minAmountOut,
+            address(this)
+        );
 
-        universalRouter.execute(commands, inputs);
+        // Llamada correcta: execute(bytes, bytes[], uint256)
+        universalRouter.execute(
+            commands,
+            inputs,
+            block.timestamp   // deadline
+        );
 
         uint256 afterBal = IERC20(usdc).balanceOf(address(this));
         uint256 received = afterBal - beforeBal;
 
         if (received == 0) revert SwapFailed();
 
-        // Enviamos los USDC al caller (e.g. KipuBank)
+        // Enviamos los USDC al caller (KipuBank)
         IERC20(usdc).safeTransfer(msg.sender, received);
 
         return received;
     }
-
     /// @notice Swapea ETH nativo (msg.value) a USDC usando Universal Router
     /// @dev La versión exacta del comando para ETH puede requerir usar WETH interno;
     ///      aquí usamos el mismo EXACT_INPUT_SINGLE con un placeholder para WETH.
@@ -72,24 +84,34 @@ contract tokenSwapManager {
 
         uint256 beforeBal = IERC20(usdc).balanceOf(address(this));
 
-        bytes memory commands = abi.encodePacked(Commands.EXACT_INPUT_SINGLE);
+        bytes memory commands = abi.encodePacked(Commands.V3_SWAP_EXACT_IN);
 
-        // Placeholder para WETH: muchas implementaciones de UniversalRouter tienen una
-        // dirección WETH interna o se pasa como parte del path. Aquí dejamos address(0)
-        // y esperas ajustar según tu implementación concreta.
+        // inputs debe ser bytes[]
+        bytes[] memory inputs = new bytes[](1);
+
         address wethPlaceholder = address(0);
         uint256 minAmountOut = 0;
-        bytes memory inputs = abi.encode(wethPlaceholder, usdc, amountIn, minAmountOut, address(this));
 
-        universalRouter.execute{value: amountIn}(commands, inputs);
+        // asignar al array
+        inputs[0] = abi.encode(
+            wethPlaceholder,
+            usdc,
+            amountIn,
+            minAmountOut,
+            address(this)
+        );
+
+        // execute necesita 3 parámetros
+        universalRouter.execute{value: amountIn}(
+            commands,
+            inputs,
+            block.timestamp
+        );
 
         uint256 afterBal = IERC20(usdc).balanceOf(address(this));
         uint256 received = afterBal - beforeBal;
 
         if (received == 0) revert SwapFailed();
-
-        // No transferimos al msg.sender aquí; el contrato que llama espera que los USDC
-        // queden en este contrato o que se los enviemos explícitamente, según el flujo.
 
         return received;
     }

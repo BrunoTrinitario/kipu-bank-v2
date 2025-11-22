@@ -7,7 +7,7 @@ import "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import "lib/chainlink-brownie-contracts/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
-contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
+contract KipuBank is RoleManager, ReentrancyGuard, TokenSwapManager {
     using SafeERC20 for IERC20;
 
     //Definiciones de variables de rol
@@ -18,16 +18,14 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
     address public constant ETH_ADDRESS = address(0);
 
     // Errores personalizados
-    //1. ZeroDeposit: Se lanza cuando se intenta hacer un depósito de cero.
-    //2. BankCapExceeded: Se lanza cuando un depósito excede el límite máximo del banco.
-    //3. WithdrawalLimitExceeded: Se lanza cuando un retiro excede el límite permitido por transacción.
-    //4. InsufficientBalance: Se lanza cuando un usuario intenta retirar más de su saldo disponible.
-    //5. TransferFailed: Se lanza cuando una transferencia de tokens o ETH falla.
-    //6. TokenNotRegistered: Se lanza cuando se intenta usar un token no registrado.
-    //7. PriceFeedNotSet: Se lanza cuando no se ha configurado un feed de precios para un token.
-    //8. InvalidParams: Se lanza cuando se proporcionan parámetros inválidos a una función.
-    //9. Unauthorized: Se lanza cuando un usuario sin los permisos adecuados intenta ejecutar una función restringida.
-    error ZeroDeposit();
+    //1. BankCapExceeded: Se lanza cuando un depósito excede el límite máximo del banco.
+    //2. WithdrawalLimitExceeded: Se lanza cuando un retiro excede el límite permitido por transacción.
+    //3. InsufficientBalance: Se lanza cuando un usuario intenta retirar más de su saldo disponible.
+    //4. TransferFailed: Se lanza cuando una transferencia de tokens o ETH falla.
+    //5. TokenNotRegistered: Se lanza cuando se intenta usar un token no registrado.
+    //6. PriceFeedNotSet: Se lanza cuando no se ha configurado un feed de precios para un token.
+    //7. InvalidParams: Se lanza cuando se proporcionan parámetros inválidos a una función.
+    //8. Unauthorized: Se lanza cuando un usuario sin los permisos adecuados intenta ejecutar una función restringida.
     error BankCapExceeded(uint256 attemptedUsd, uint256 availableUsd);
     error WithdrawalLimitExceeded(uint256 attemptedUsd, uint256 limitUsd);
     error InsufficientBalance(uint256 balance, uint256 requested);
@@ -45,8 +43,6 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
     /// @notice Saldo de los usuarios: usuario => cantidad (unidades nativas del token)
     mapping(address => uint256) private balances;
     AggregatorV3Interface public immutable ethUsdFeed;
-    //Address del token USDC
-    address public usdc;
 
 
     // contadores
@@ -68,13 +64,19 @@ contract KipuBank is RoleManager, ReentrancyGuard, TokenManager {
     /// @param _bankCapUsd Limite del banco expresado en USD (e.g. $1,000 = 1_000 * 10**6)
     /// @param _withdrawalLimitUsd Límite de retiro por transacción en USD con USDC_DECIMALS
     /// @param _ethUsdFeed Feed de precios Chainlink ETH / USD
-    constructor(uint256 _bankCapUsd, uint256 _withdrawalLimitUsd, address _ethUsdFeed, address _usdc) RoleManager() TokenManager(_usdc) {
+    constructor(
+        uint256 _bankCapUsd, 
+        uint256 _withdrawalLimitUsd, 
+        address _ethUsdFeed,
+        address _usdc,
+        address payable _universalRouter,
+        uint16 _slippageBps
+        ) RoleManager() TokenSwapManager(_usdc, _universalRouter, _slippageBps) {
         if (_ethUsdFeed == address(0) || _bankCapUsd == 0) revert InvalidParams();
         // Incializamos el limite del banco y el límite de retiro en USD
         bankCapUsd = _bankCapUsd;
         withdrawalLimitUsd = _withdrawalLimitUsd;
         ethUsdFeed = AggregatorV3Interface(_ethUsdFeed);
-        usdc = _usdc;
     }
 
     /// @notice Función de rescate para que el administrador pueda recuperar tokens o ETH enviados por error al contrato.

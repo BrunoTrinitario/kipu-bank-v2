@@ -64,7 +64,7 @@ contract RoleManager is AccessControl {
     }
 
     function getAvailableRoles() external pure returns (bytes32[] memory) {
-        bytes32 ;
+        bytes32[] memory roles = new bytes32[](2);
         roles[0] = CONFIG_ROLE;
         roles[1] = PAUSER_ROLE;
         return roles;
